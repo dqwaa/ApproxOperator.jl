@@ -364,6 +364,78 @@ function ∫uudΩ(ap::T,k::AbstractMatrix{Float64}) where T<:AbstractElement
     end
 end
 
+function H₁(ap::T) where T<:Element2D
+    Δu²= 0
+    Δδu² = 0
+    for ξ in ap.𝓖
+        𝑤 = ξ.𝑤
+        Bₓ = ξ[:∂𝝭∂x]
+        Bₜ = ξ[:∂𝝭∂y]
+        ∂ūᵢ∂x = ξ.∂u∂x
+        ∂ūᵢ∂t = ξ.∂u∂t
+        ∂δūᵢ∂x = ξ.∂δu∂x
+        ∂δūᵢ∂t = ξ.∂δu∂t
+        ∂uᵢ∂x = 0
+        ∂uᵢ∂t = 0
+        ∂δuᵢ∂x = 0
+        ∂δuᵢ∂t = 0
+        for (i,xᵢ) in enumerate(ap.𝓒)
+            ∂uᵢ∂x += Bₓ[i]*xᵢ.d
+            ∂uᵢ∂t += Bₜ[i]*xᵢ.d
+            ∂δuᵢ∂x += Bₓ[i]*xᵢ.δd
+            ∂δuᵢ∂t += Bₜ[i]*xᵢ.δd
+        end
+        Δu² += ((∂uᵢ∂t - ∂ūᵢ∂t)^2 + (∂uᵢ∂x - ∂ūᵢ∂x)^2)*𝑤
+        Δδu² += ((∂δuᵢ∂t - ∂δūᵢ∂t)^2 + (∂δuᵢ∂x - ∂δūᵢ∂x)^2)*𝑤
+    end
+    return Δu², Δδu²
+end
+
+function H₁(ap::T) where T<:Element3D
+    Δu²= 0
+    Δδu² = 0
+    for ξ in ap.𝓖
+        𝑤 = ξ.𝑤
+        B₁ = ξ[:∂𝝭∂x]
+        B₂ = ξ[:∂𝝭∂y]
+        Bₜ = ξ[:∂𝝭∂z]
+        ∂ūᵢ∂x = ξ.∂u∂x
+        ∂ūᵢ∂y = ξ.∂u∂y
+        ∂ūᵢ∂t = ξ.∂u∂t
+        ∂δūᵢ∂x = ξ.∂δu∂x
+        ∂δūᵢ∂y = ξ.∂δu∂y
+        ∂δūᵢ∂t = ξ.∂δu∂t
+        ∂uᵢ∂x = 0
+        ∂uᵢ∂y = 0
+        ∂uᵢ∂t = 0
+        ∂δuᵢ∂x = 0
+        ∂δuᵢ∂y = 0
+        ∂δuᵢ∂t = 0
+        for (i,xᵢ) in enumerate(ap.𝓒)
+            ∂uᵢ∂x += B₁[i]*xᵢ.d
+            ∂uᵢ∂y += B₂[i]*xᵢ.d
+            ∂uᵢ∂t += Bₜ[i]*xᵢ.d
+            ∂δuᵢ∂x += B₁[i]*xᵢ.δd
+            ∂δuᵢ∂y += B₂[i]*xᵢ.δd
+            ∂δuᵢ∂t += Bₜ[i]*xᵢ.δd
+        end
+        Δu² += ((∂uᵢ∂t - ∂ūᵢ∂t)^2 + (∂uᵢ∂x - ∂ūᵢ∂x)^2 + (∂uᵢ∂y - ∂ūᵢ∂y)^2)*𝑤
+        Δδu² += ((∂δuᵢ∂t - ∂δūᵢ∂t)^2 + (∂δuᵢ∂x - ∂δūᵢ∂x)^2 + (∂δuᵢ∂y - ∂δūᵢ∂y)^2)*𝑤
+    end
+    return Δu², Δδu²
+end
+
+function H₁(aps::Vector{T}) where T<:AbstractElement
+    HₑNorm_Δu²= 0.
+    HₑNorm_Δδu² = 0.
+    for ap in aps
+        Δu², Δδu² = H₁(ap)
+        HₑNorm_Δu² += Δu²
+        HₑNorm_Δδu² += Δδu²
+    end
+    return HₑNorm_Δu²^0.5, HₑNorm_Δδu²^0.5
+end
+
 function Hₑ(ap::T) where T<:Element2D
     Δu²= 0
     u² = 0
