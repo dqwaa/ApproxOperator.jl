@@ -70,10 +70,11 @@ function ∫∫qᵢpᵢdxdy(ap::T,k::AbstractMatrix) where T<:AbstractElement
 end
 
 function ∫∫∇𝒑bdxdy(ap::T,k::AbstractMatrix,f::AbstractVector) where T<:AbstractElement
-    𝓒 = a.𝓒;𝓖 = a.𝓖
+    𝓒 = ap.𝓒; 𝓖 = ap.𝓖
     for ξ in 𝓖
         B₁ = ξ[:∂𝝭∂x]
         B₂ = ξ[:∂𝝭∂y]
+        b = ξ.b
         𝑤 = ξ.𝑤
         for (i,xᵢ) in enumerate(𝓒)
             I = xᵢ.𝐼
