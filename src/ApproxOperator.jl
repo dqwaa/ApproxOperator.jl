@@ -44,6 +44,7 @@ include("operation/thick_plate.jl")
 include("operation/hamilton.jl")
 include("operation/test.jl")
 include("operation/stokes.jl")
+include("operation/weighted_residual.jl")
 # include("operation/phasefield.jl")
 # include("operation/error_estimates.jl")
 
@@ -60,5 +61,6 @@ export getPhysicalGroups, get𝑿ᵢ, getElements, addEdgeElements, getDOFs
 export getPiecewiseElements, getPiecewiseBoundaryElements
 export getMacroElements, getMacroBoundaryElements, getCurvedElements, getCurvedPiecewiseElements
 export Tri3toTriBell, Tri3toTriHermite, Seg2toSegHermite
+export WeightedResidual
 
 end
