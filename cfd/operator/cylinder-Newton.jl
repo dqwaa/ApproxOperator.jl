@@ -28,8 +28,8 @@ const Re = ρ * U₀ * D / μ
 @printf("Reynolds number: Re = %.2f\n", Re)
 
 # --- 网格配置文件路径 ---
-const mesh_file_u   = "msh/cylinder/cylinder_tri_0.25-0.8.msh"  
-const mesh_file_p   = "msh/cylinder/cylinder_tri_0.5-1.6.msh"  
+const mesh_file_u   = "msh/tri/cylinder_tri_0.25-0.8.msh"  
+const mesh_file_p   = "msh/tri/cylinder_tri_0.5-1.6.msh"  
 
 const mesh_type     = "tri"       
 const intOrder      = 2            # 高斯积分阶数
@@ -38,8 +38,8 @@ const type_p = :(ReproducingKernel{:Linear2D,:□,:CubicSpline})
 const TypeP  = eval(type_p)   
 
 # --- VTK 输出配置 ---
-const outdir    = "./vtk/cylinder-flow"
-const case_name = "cylinder_tri_0.5-1.6-newton"
+const outdir    = "./VTK/cylinder"
+const case_name = "cylinder_newton"
 
 # --- 边界条件物理组名映射 ---
 const INLET_GROUP  = "Γ₁"          # 入口物理组名
@@ -61,7 +61,8 @@ const H_half       = 5.0       # 通道半高 (入口 y ∈ [-5, 5])
 # ---- 自适应支撑域工具函数 ----
 # 根据局部节点最近邻距离自动计算 RKPM 支撑域 s₁,s₂,s₃
 #   k_nearest: 最近邻个数 (典型 4~8)
-#   α: 支撑域缩放因子 (典型 1.5~3.0，= 支撑域半径 / 局部节点间距)
+#   α: 支撑域缩放因子 (典型 1.5~3.0，= 支撑域半径 / 局部节点间距).。。。。。输出信息多少个节点？（一个单元）。一个support什么意思，覆盖几个节点？h_local是局部节点间距，
+# h_local[i] = dists[k]，dists是距离数组，取第k个最近邻的距离作为局部间距。r_support = α * h_local[i]，n_support[i] = count(d -> d <= r_support, dists)，计算支撑域半径内覆盖的邻点数。
 function set_adaptive_support!(nodes_p, sp::ApproxOperator.RegularGrid; k_nearest=12, α=2.5)
     n = length(nodes_p)
     h_local    = zeros(n)
@@ -106,7 +107,7 @@ nᵖ = length(nodes_p)
 sp = RegularGrid(xᵖ, yᵖ, zᵖ; n=8, γ=4)
 set_adaptive_support!(nodes_p, sp; k_nearest=12, α=2.5)
 
-# ---- 3.2 速度网格 (FEM, 细网格) ----
+# ---- 3.2 速度网格 (FEM, 细网格) ----改用压力网格的refine格式。
 @info "Loading velocity mesh..."
 gmsh.clear()  
 gmsh.open(mesh_file_u)
@@ -119,11 +120,11 @@ nᵘ       = length(nodes)
 # ---- 3.3 提取单元 ----
 @info "Extracting elements..."
 elements_u  = getElements(nodes,    entities["Ω"],   intOrder)
-elements_p  = getElements(nodes_p,  entities_p["Ω"],  TypeP, intOrder, sp)
+# elements_p  = getElements(nodes_p,  entities_p["Ω"],  TypeP, intOrder, sp)#entities_p改为entities就行？
 
 elements_vtk = getElements(nodes, entities["Ω"], intOrder)
 
-elements_inlet  = getElements(nodes, entities[INLET_GROUP],  intOrder)
+elements_inlet  = getElements(nodes, entities[INLET_GROUP],  intOrder)#这几个单元在哪用？什么意思
 elements_outlet = getElements(nodes, entities[OUTLET_GROUP], intOrder)
 elements_wall_list = [getElements(nodes, entities[g], intOrder) for g in WALL_GROUPS]
 
@@ -139,10 +140,10 @@ const α_pen = 1e10
 prescribe!(elements_inlet, :g₁ => U₀, :g₂ => 0.0, :α   => α_pen,
                            :n₁₁ => 1.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
 
-prescribe!(elements_outlet, :g₁ => 0.0, :g₂ => 0.0, :α   => 0.0,
+prescribe!(elements_outlet, :g₁ => 0.0, :g₂ => 0.0, :α   => 0.0,#都是0可以删除？
                             :n₁₁ => 0.0, :n₂₂ => 0.0, :n₁₂ => 0.0)
 
-for elms in elements_wall_list
+for elms in elements_wall_list          #上下底的法向不需要
     prescribe!(elms, :g₁ => 0.0, :g₂ => 0.0, :α   => α_pen,
                      :n₁₁ => 1.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
 end

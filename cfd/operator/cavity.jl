@@ -138,3 +138,136 @@ vtk_grid("./vtk/cavity_"*type*"_"*string(ndiv_u)*"_"*string(nᵖ),points,cells) 
 end
 
 # println(nodes[5])
+
+
+# function newton_step!(d₁, d₂, p_vec, d₁_old, d₂_old;
+
+#                        Kuu, Kuu_visc, Kup, Kpp, tmp_vec, rhs_u, rhs_p,
+
+#                        K_pen, f_pen, M_t, f_g, elements_u,
+
+#                        nᵘ, nᵖ, Δt, tol, maxiter)
+
+#     converged = false
+#     rel_err   = Inf
+#     iters     = 0
+
+#     # 构建 u_n 向量（上一时间步解）
+#     u_n_vec = zeros(2*nᵘ)
+#     u_n_vec[1:2:end] .= d₁_old
+#     u_n_vec[2:2:end] .= d₂_old
+
+
+
+#     for m in 1:maxiter
+#         iters = m
+
+#         # ---- 构建当前速度向量 u^m ----
+#         u_m_vec = zeros(2*nᵘ)
+#         u_m_vec[1:2:end] .= d₁
+#         u_m_vec[2:2:end] .= d₂
+
+#         # =================== 组装 Jacobian 矩阵 ==============================
+
+#         fill!(Kuu, 0.0); fill!(Kup, 0.0); fill!(Kpp, 0.0)
+
+#         op_visc_mat(Kuu)          # + K^{uu}
+#         Kuu .+= M_t ./ Δt         # + (1/Δt)M^t
+#         op_conv_mat(Kuu)          # + M^g(u^m)
+#         op_pres_mat(Kup)          # K^{up}
+
+#         Kuu .+= K_pen             # + K_pen
+#         Kpp[1, 1] = 1.0           # 压力定零
+
+#         # =================== 计算残差 r^m =====================================
+
+#         # r^m = f_pen - (1/Δt)M^t·(u^m-u^n) - f^g(u^m) - K^{uu}·u^m - K_pen·u^m - K^{up}·p^m
+#         rhs_u .= f_pen
+
+#         # - (1/Δt) M^t · (u^m - u^n)
+#         @. tmp_vec = (u_m_vec - u_n_vec) / Δt
+#         mul!(rhs_u, M_t, tmp_vec, -1.0, 1.0)    # rhs_u -= M_t * tmp_vec
+
+#         # - f^g(u^m)
+#         compute_convection_force!(elements_u, f_g)
+#         rhs_u .-= f_g
+
+#         # - K^{uu} · u^m
+#         fill!(Kuu_visc, 0.0)
+
+#         op_visc_mat(Kuu_visc)
+#         mul!(tmp_vec, Kuu_visc, u_m_vec)
+
+#         rhs_u .-= tmp_vec
+
+#         # - K_pen · u^m
+#         mul!(tmp_vec, K_pen, u_m_vec)
+
+#         rhs_u .-= tmp_vec
+
+#         # - K^{up} · p^m
+#         mul!(tmp_vec, Kup', p_vec)
+
+#         rhs_u .-= tmp_vec
+
+#         # =================== 计算残差 c^m =====================================
+#         # -c^m = - K^{upT} · u^m
+
+#         fill!(rhs_p, 0.0)
+#         mul!(rhs_p, Kup, u_m_vec)
+#         rhs_p .*= -1.0
+
+#         # =================== 求解 Newton 增量 ================================
+
+#         K = [Kuu  Kup'; Kup  Kpp]
+#         RHS = [rhs_u; rhs_p]
+#         dx = K \ RHS
+
+
+#         Δu_vec = dx[1:2*nᵘ]
+#         Δp_vec = dx[2*nᵘ+1:end]
+
+#         # =================== 更新解 ==========================================
+
+#         d₁ .+= Δu_vec[1:2:end]
+#         d₂ .+= Δu_vec[2:2:end]
+
+#         p_vec .+= Δp_vec
+#         push!(nodes,   :d₁ => d₁, :d₂ => d₂)
+#         push!(nodes_p, :p => p_vec)
+
+#         # ---- 更新积分点速度场 ----
+
+#         for elm in elements_u
+
+#             update_velocity(elm)
+
+#         end
+
+#         # ---- 收敛检查 ----
+
+#         norm_du = norm(Δu_vec)
+#         norm_u  = norm(u_m_vec) + 1e-16
+
+#         rel_err = norm_du / norm_u
+
+#         @printf("  Newton %2d: |Δu|/|u|=%.3e, |r|=%.3e\n",
+
+#                 m, rel_err, norm(rhs_u))
+
+
+
+#         if rel_err < tol
+
+#             converged = true
+
+#             break
+
+#         end
+
+#     end
+
+#     return converged, iters, rel_err
+
+# end 
+
