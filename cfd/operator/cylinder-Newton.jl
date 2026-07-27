@@ -10,10 +10,9 @@ using ApproxOperator.GmshImport: getPhysicalGroups, get𝑿ᵢ, getElements
 using WriteVTK
 using SparseArrays, LinearAlgebra
 using Printf
+using Statistics
 
-# 底层算子 (Stokes 模块)
 import ApproxOperator.Stokes: ∫∫μ∇u∇vdxdy,  ∫∫ρvdxdy, ∫∫ρ∇uvudxdy, update_velocity
-# 辅助算子 (Elasticity 模块)
 import ApproxOperator.Elasticity: ∫∫p∇udxdy, ∫vᵢgᵢds
 import Gmsh: gmsh
 
@@ -28,8 +27,8 @@ const Re = ρ * U₀ * D / μ
 @printf("Reynolds number: Re = %.2f\n", Re)
 
 # --- 网格配置文件路径 ---
-const mesh_file_u   = "msh/tri/cylinder_tri_0.25-0.8.msh"  
-const mesh_file_p   = "msh/tri/cylinder_tri_0.5-1.6.msh"  
+const mesh_file_u   = "cfd/msh/tri/cylinder_tri_0.4-1.2refine.msh"  
+const mesh_file_p   = "cfd/msh/tri/cylinder_tri_0.4-1.2.msh"
 
 const mesh_type     = "tri"       
 const intOrder      = 2            # 高斯积分阶数
@@ -38,18 +37,20 @@ const type_p = :(ReproducingKernel{:Linear2D,:□,:CubicSpline})
 const TypeP  = eval(type_p)   
 
 # --- VTK 输出配置 ---
-const outdir    = "./VTK/cylinder"
+const outdir    = "cfd/VTK/cylinder"
 const case_name = "cylinder_newton"
 
 # --- 边界条件物理组名映射 ---
-const INLET_GROUP  = "Γ₁"          # 入口物理组名
-const OUTLET_GROUP = "Γ₂"          # 出口物理组名 (natural BC)
-const WALL_GROUPS  = ["Γ₃", "Γ₄", "Γ₅"] # 固壁物理组名列表 (顶+底+圆柱)
+const inlet    = "Γ₁"          
+const outlet   = "Γ₂"          
+const top      = "Γ₃"
+const bottom   = "Γ₄"
+const cylinder = "Γ₅"
 
 # --- 时间推进与非线性求解参数 ---
-const Δt           = 0.005      # 推荐减小至 0.01，配合 Newton 格式更稳定捕捉非定常涡街
-const nsteps       = 6000     
-const vtk_interval = 50          # VTK 输出间隔步数       
+const Δt           = 0.002      # 推荐减小至 0.01，配合 Newton 格式更稳定捕捉非定常涡街
+const nsteps       = 8000     
+const vtk_interval = 100          # VTK 输出间隔步数       
 
 const maxNewton    = 20       
 const newtonTol    = 1e-5     
@@ -59,11 +60,7 @@ const H_half       = 5.0       # 通道半高 (入口 y ∈ [-5, 5])
 # ======================== Section 3: 网格加载与预处理 ==========================
 
 # ---- 自适应支撑域工具函数 ----
-# 根据局部节点最近邻距离自动计算 RKPM 支撑域 s₁,s₂,s₃
-#   k_nearest: 最近邻个数 (典型 4~8)
-#   α: 支撑域缩放因子 (典型 1.5~3.0，= 支撑域半径 / 局部节点间距).。。。。。输出信息多少个节点？（一个单元）。一个support什么意思，覆盖几个节点？h_local是局部节点间距，
-# h_local[i] = dists[k]，dists是距离数组，取第k个最近邻的距离作为局部间距。r_support = α * h_local[i]，n_support[i] = count(d -> d <= r_support, dists)，计算支撑域半径内覆盖的邻点数。
-function set_adaptive_support!(nodes_p, sp::ApproxOperator.RegularGrid; k_nearest=12, α=2.5)
+function set_adaptive_support!(nodes_p, sp::ApproxOperator.RegularGrid; k_nearest=4, α=2.5)
     n = length(nodes_p)
     h_local    = zeros(n)
     n_support  = zeros(Int, n)    # 每个节点支撑域半径内覆盖的邻点数
@@ -90,7 +87,13 @@ function set_adaptive_support!(nodes_p, sp::ApproxOperator.RegularGrid; k_neares
                    :s₃     => α .* h_local,
                    ) 
 
-    @info "Adaptive RKPM support: h_min=$(minimum(h_local)) h_max=$(maximum(h_local)) h_avg=$(mean(h_local)) α=$α"
+    total_covered_nodes = n_support .+ 1 
+    
+    @info "=================== RKPM 支撑域统计报告 ==================="
+    @info "  • 压力场总节点数 (Total Nodes)    : $n 个"
+    @info "  • 局部节点间距 (Local Spacing h) : min=$(minimum(h_local)), max=$(maximum(h_local)), avg=$(mean(h_local))"
+    @info "  • 每个支撑域覆盖的节点数 (Coverage) : min=$(minimum(total_covered_nodes)), max=$(maximum(total_covered_nodes)), avg=$(round(mean(total_covered_nodes), digits=1)) 个"
+    @info "=========================================================="
 end   
 
 
@@ -99,15 +102,15 @@ gmsh.initialize()
 # ---- 3.1 压力网格 (RKPM, 粗网格) ----
 @info "Loading pressure mesh..."
 gmsh.open(mesh_file_p)
-nodes_p   = get𝑿ᵢ()
-entities_p = getPhysicalGroups()   
+nodes_p    = get𝑿ᵢ()
+entities = getPhysicalGroups()   
 xᵖ, yᵖ, zᵖ = nodes_p.x, nodes_p.y, nodes_p.z
 nᵖ = length(nodes_p)
 
 sp = RegularGrid(xᵖ, yᵖ, zᵖ; n=8, γ=4)
-set_adaptive_support!(nodes_p, sp; k_nearest=12, α=2.5)
+set_adaptive_support!(nodes_p, sp; k_nearest=4, α=2.5)
 
-# ---- 3.2 速度网格 (FEM, 细网格) ----改用压力网格的refine格式。
+# ---- 3.2 速度网格 (FEM, 细网格) ----
 @info "Loading velocity mesh..."
 gmsh.clear()  
 gmsh.open(mesh_file_u)
@@ -120,13 +123,15 @@ nᵘ       = length(nodes)
 # ---- 3.3 提取单元 ----
 @info "Extracting elements..."
 elements_u  = getElements(nodes,    entities["Ω"],   intOrder)
-# elements_p  = getElements(nodes_p,  entities_p["Ω"],  TypeP, intOrder, sp)#entities_p改为entities就行？
+elements_p  = getElements(nodes_p,  entities["Ω"],  TypeP, intOrder, sp)
+
+elements_inlet  = getElements(nodes, entities[inlet],  intOrder)
+elements_outlet = getElements(nodes, entities[outlet], intOrder)
+elements_top    = getElements(nodes, entities[top],    intOrder)
+elements_bottom = getElements(nodes, entities[bottom], intOrder)
+elements_cylinder = getElements(nodes, entities[cylinder], intOrder; normal=true)
 
 elements_vtk = getElements(nodes, entities["Ω"], intOrder)
-
-elements_inlet  = getElements(nodes, entities[INLET_GROUP],  intOrder)#这几个单元在哪用？什么意思
-elements_outlet = getElements(nodes, entities[OUTLET_GROUP], intOrder)
-elements_wall_list = [getElements(nodes, entities[g], intOrder) for g in WALL_GROUPS]
 
 # ---- 3.4 积分点参数初始化 ----
 prescribe!(elements_u, :μ => μ, :ρ => ρ, :Δt => Δt)
@@ -135,25 +140,35 @@ prescribe!(elements_u, :u₁   => 0.0, :u₂   => 0.0,
                        :∂u₂∂x => 0.0, :∂u₂∂y => 0.0)
 
 # ---- 3.5 边界条件 (罚函数法) ----
-const α_pen = 1e10
+const α_pen = 1e8
+
 
 prescribe!(elements_inlet, :g₁ => U₀, :g₂ => 0.0, :α   => α_pen,
                            :n₁₁ => 1.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
+prescribe!(elements_outlet, :g₁ => 0.0, :g₂ => 0.0, :α   => 0.0,
+                            :n₁₁ => 0.0, :n₂₂ => 0.0, :n₁₂ => 0.0)         
+prescribe!(elements_top,    :g₁ => 0.0, :g₂ => 0.0, :α => α_pen,
+                            :n₁₁ => 0.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
+prescribe!(elements_bottom, :g₁ => 0.0, :g₂ => 0.0, :α => α_pen,
+                            :n₁₁ => 0.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
+prescribe!(elements_cylinder, :g₁ => 0.0, :g₂ => 0.0, :α => α_pen,
+                              :n₁₁ => 1.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
 
-prescribe!(elements_outlet, :g₁ => 0.0, :g₂ => 0.0, :α   => 0.0,#都是0可以删除？
-                            :n₁₁ => 0.0, :n₂₂ => 0.0, :n₁₂ => 0.0)
-
-for elms in elements_wall_list          #上下底的法向不需要
-    prescribe!(elms, :g₁ => 0.0, :g₂ => 0.0, :α   => α_pen,
-                     :n₁₁ => 1.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
-end
 
 # ---- 3.6 计算形函数 ----
 @info "Computing shape functions..."
 set∇𝝭!(elements_u)    
 set𝝭!(elements_p)     
 
-for elms in [elements_inlet, elements_outlet, elements_wall_list...]
+all_boundary_elements = [
+    elements_inlet, 
+    elements_outlet, 
+    elements_top,     
+    elements_bottom,  
+    elements_cylinder     
+]
+
+for elms in all_boundary_elements
     if !isempty(elms)
         push!(elms, :𝝭)
         for elm in elms
@@ -163,14 +178,14 @@ for elms in [elements_inlet, elements_outlet, elements_wall_list...]
         end
     end
 end
-elements_walls = reduce(∪, elements_wall_list)
+elements_walls = reduce(∪, [elements_top, elements_bottom, elements_cylinder])
 
 # ==================== Section 4: 全局矩阵 / 向量初始化 =========================
 
-Kuu      = zeros(2*nᵘ, 2*nᵘ)   # 全 Jacobian 中的速度块
-Kuu_visc = zeros(2*nᵘ, 2*nᵘ)   # 纯粘性刚度常数阵
-Kup      = zeros(nᵖ, 2*nᵘ)     # 散度/梯度耦合块
-Kpp      = zeros(nᵖ, nᵖ)       # 压力块
+Kuu      = spzeros(2*nᵘ, 2*nᵘ)   # 全 Jacobian 中的速度块
+Kuu_visc = spzeros(2*nᵘ, 2*nᵘ)   # 纯粘性刚度常数阵
+Kup      = spzeros(nᵖ, 2*nᵘ)     # 散度/梯度耦合块
+Kpp      = spzeros(nᵖ, nᵖ)       # 压力块
 
 rhs_u    = zeros(2*nᵘ)         # 速度残差向量
 rhs_p    = zeros(nᵖ)           # 压力(连续性)残差向量
@@ -192,8 +207,8 @@ push!(nodes_p, :p => p_vec)
 
 # 预计算罚项
 @info "Precomputing penalty matrix and force..."
-K_pen = zeros(2*nᵘ, 2*nᵘ)
-f_pen = zeros(2*nᵘ)
+K_pen = spzeros(2*nᵘ, 2*nᵘ)
+f_pen = spzeros(2*nᵘ)
 bc_op = ∫vᵢgᵢds => (elements_inlet ∪ elements_walls)
 bc_op(K_pen, f_pen)
 
@@ -205,12 +220,12 @@ op_pres_mat = ∫∫p∇udxdy   => (elements_p, elements_u)
 
 # 预计算质量矩阵 M_t
 @info "Precomputing mass matrix M_t..."
-M_t = zeros(2*nᵘ, 2*nᵘ)
+M_t = spzeros(2*nᵘ, 2*nᵘ)
 op_mass_t(M_t)
 
 # 辅助函数：利用现有算子准确组装对流非线性力项 f^g(u^m)
-function compute_convection_force!(elements_u, f_g, op_conv_mat, u_m_vec)
-    K_tmp = zeros(length(f_g), length(f_g))
+function compute_convection_force!(f_g, op_conv_mat, u_m_vec)
+    K_tmp = spzeros(length(f_g), length(f_g))
     op_conv_mat(K_tmp) 
     mul!(f_g, K_tmp, u_m_vec)
 end
@@ -220,14 +235,12 @@ end
 function newton_step!(d₁, d₂, p_vec, d₁_old, d₂_old;
                        Kuu, Kuu_visc, Kup, Kpp, tmp_vec, rhs_u, rhs_p,
                        K_pen, f_pen, M_t, f_g, elements_u, op_conv_mat, op_pres_mat,
-                       nᵘ, nᵖ, Δt, tol, maxiter)
+                       nᵘ, Δt, tol, maxiter)
     converged = false
     rel_err   = Inf
     iters     = 0
-    ω         = 1.0      # 当前阻尼因子 (1.0=纯Newton, <1.0=欠松弛)
-    rel_prev  = Inf
 
-    u_n_vec = zeros(2*nᵘ)
+    u_n_vec = spzeros(2*nᵘ)
     u_n_vec[1:2:end] .= d₁_old
     u_n_vec[2:2:end] .= d₂_old
 
@@ -238,7 +251,7 @@ function newton_step!(d₁, d₂, p_vec, d₁_old, d₂_old;
     for m in 1:maxiter
         iters = m
 
-        u_m_vec = zeros(2*nᵘ)
+        u_m_vec = spzeros(2*nᵘ)
         u_m_vec[1:2:end] .= d₁
         u_m_vec[2:2:end] .= d₂
 
@@ -263,7 +276,7 @@ function newton_step!(d₁, d₂, p_vec, d₁_old, d₂_old;
         mul!(rhs_u, M_t, tmp_vec, -1.0, 1.0)
 
         # - f^g(u^m)
-        compute_convection_force!(elements_u, f_g, op_conv_mat, u_m_vec)
+        compute_convection_force!(f_g, op_conv_mat, u_m_vec)
         rhs_u .-= f_g
 
         # - K^{uu} · u^m
@@ -294,19 +307,10 @@ function newton_step!(d₁, d₂, p_vec, d₁_old, d₂_old;
         Δu_vec = dx[1:2*nᵘ]
         Δp_vec = dx[2*nᵘ+1:end]
 
-        # =================== 阻尼 Newton 更新 ==================================
-        # 策略1: Δu 反弹 → 阻尼减半
-        if m > 1 && rel_err > rel_prev
-            ω = max(0.0625, ω * 0.5)
-        end
-        # 策略2: 收敛过慢 (迭代 > 8 且误差仍 > 1e-3) → 强制降阻尼
-        if m > 8 && rel_err > 1e-3 && ω > 0.5
-            ω = 0.5
-        end
-
-        d₁ .+= ω .* Δu_vec[1:2:end]
-        d₂ .+= ω .* Δu_vec[2:2:end]
-        p_vec .+= ω .* Δp_vec
+        # =================== Newton 更新 =============================
+        d₁ .+= Δu_vec[1:2:end]
+        d₂ .+= Δu_vec[2:2:end]
+        p_vec .+= Δp_vec
         push!(nodes,   :d₁ => d₁, :d₂ => d₂)
         push!(nodes_p, :p => p_vec)
 
@@ -318,9 +322,7 @@ function newton_step!(d₁, d₂, p_vec, d₁_old, d₂_old;
         norm_du = norm(Δu_vec)
         norm_u  = norm(u_m_vec) + 1e-16
         rel_err = norm_du / norm_u
-        rel_prev = rel_err
-        damp_str = ω < 1.0 ? @sprintf(" ω=%.3f", ω) : ""
-        @printf("  Newton iter %2d: |Δu|/|u| = %.3e, |r_u| = %.3e%s\n", m, rel_err, norm(rhs_u), damp_str)
+        @printf("  Newton iter %2d: |Δu|/|u| = %.3e, |r_u| = %.3e\n", m, rel_err, norm(rhs_u))
 
         if rel_err < tol
             converged = true
@@ -329,9 +331,6 @@ function newton_step!(d₁, d₂, p_vec, d₁_old, d₂_old;
     end
     return converged, iters, rel_err
 end
-
-# # ---- 6.5 高性能优化：预计算 VTK 插值形函数（跳出时间循环，杜绝内存泄漏） ----
-
 
 # ====================== Section 7: 时间推进主循环 ==============================
 
@@ -352,8 +351,6 @@ for step in 1:nsteps
         ramp_factor = 1.0
     end
 
-    # 抛物型空间分布: u(y) = U₀ * (1 - (y/H)^2), 壁面处 u(±H)=0
-    # 先统一初始化入口数据结构（α, n 等不随 y 变化）
     prescribe!(elements_inlet, :g₁ => 0.0, :g₂ => 0.0, :α   => α_pen,
                                :n₁₁ => 1.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
 
@@ -370,18 +367,18 @@ for step in 1:nsteps
     fill!(f_pen, 0.0)
     bc_op(K_pen, f_pen)
 
-    # ---- 7.0.5 外推初猜: ũ^{n+1} = 2u^n - u^{n-1} (加速涡街脱落期收敛) ----
+
     # ---- Newton 初值 ----
+if step == 1
+        @. d₁ = d₁_old
+        @. d₂ = d₂_old
+    else
+        # 始终使用线性外推作为更好的初猜值
+        @. d₁ = 2.0 * d₁_old - d₁_old2
+        @. d₂ = 2.0 * d₂_old - d₂_old2
+    end
 
-    if step <= 100
 
-    @. d₁ = 2*d₁_old - d₁_old2
-    @. d₂ = 2*d₂_old - d₂_old2
-
-else
-    @. d₁ = d₁_old
-    @. d₂ = d₂_old
-end
     push!(nodes, :d₁ => d₁, :d₂ => d₂)
 
     for elm in elements_u
@@ -389,14 +386,14 @@ end
 end
 
     # ---- 7.1 Newton-Raphson 非线性求解 ----
-    converged, iters, rel_err = newton_step!(
+    converged, iters, rel_err = Base.invokelatest(newton_step!,
         d₁, d₂, p_vec, d₁_old, d₂_old;
         Kuu=Kuu, Kuu_visc=Kuu_visc, Kup=Kup, Kpp=Kpp,
         tmp_vec=tmp_vec, rhs_u=rhs_u, rhs_p=rhs_p,
         K_pen=K_pen, f_pen=f_pen, M_t=M_t,
         f_g=f_g, elements_u=elements_u,
         op_conv_mat=op_conv_mat, op_pres_mat=op_pres_mat,
-        nᵘ=nᵘ, nᵖ=nᵖ,
+        nᵘ=nᵘ,
         Δt=Δt,
         tol=newtonTol, maxiter=maxNewton
     )
