@@ -48,9 +48,9 @@ const bottom   = "Γ₄"
 const cylinder = "Γ₅"
 
 # --- 时间推进与非线性求解参数 ---
-const Δt           = 0.002      # 推荐减小至 0.01，配合 Newton 格式更稳定捕捉非定常涡街
-const nsteps       = 8000     
-const vtk_interval = 100          # VTK 输出间隔步数       
+const Δt           = 0.002      
+const nsteps       = 15000     
+const vtk_interval = 50          # VTK 输出间隔步数       
 
 const maxNewton    = 20       
 const newtonTol    = 1e-5     
@@ -240,79 +240,85 @@ function newton_step!(d₁, d₂, p_vec, d₁_old, d₂_old;
     rel_err   = Inf
     iters     = 0
 
-    u_n_vec = spzeros(2*nᵘ)
+    u_n_vec = zeros(Float64, 2*nᵘ)
     u_n_vec[1:2:end] .= d₁_old
     u_n_vec[2:2:end] .= d₂_old
+    
+    u_m_vec = zeros(Float64, 2*nᵘ)
 
-    # 纯粘性刚度阵不随迭代改变，提前组装
+    # 2. 几何/线性矩阵提前组装 
     fill!(Kuu_visc, 0.0)
     op_visc_mat(Kuu_visc)
+    
+    fill!(Kup, 0.0)
+    op_pres_mat(Kup)
+    Kup_T = copy(Kup') # 提前计算好转置，避免循环中重复转置
 
     for m in 1:maxiter
         iters = m
-
-        u_m_vec = spzeros(2*nᵘ)
         u_m_vec[1:2:end] .= d₁
         u_m_vec[2:2:end] .= d₂
 
-        # =================== 组装 Jacobian 矩阵 ==============================
-        fill!(Kuu, 0.0); fill!(Kup, 0.0); fill!(Kpp, 0.0)
+        # =================== 组装 Jacobian ============
+        fill!(Kuu, 0.0); fill!(Kpp, 0.0)
 
         Kuu .+= Kuu_visc          
-        Kuu .+= M_t ./ Δt         
-        op_conv_mat(Kuu)          
-        op_pres_mat(Kup)          
+        Kuu .+= M_t .* (1.0 / Δt) # 避免 ./ Δt 产生临时数组
+        op_conv_mat(Kuu)          # 确保这里的对流矩阵是基于最新的 elements_u 线性化计算的
         Kuu .+= K_pen             
 
-        # 【核心修正 1】: 严格消除压力零模的 Jacobian 耦合，避免破坏质量守恒
-        Kup[1, :] .= 0.0          
-        Kpp[1, 1]  = 1.0          
-
-        # =================== 计算速度残差 r^m =====================================
+        # =================== 计算残差  =======================
         rhs_u .= f_pen
 
-        # - (1/Δt) M^t · (u^m - u^n)
         @. tmp_vec = (u_m_vec - u_n_vec) / Δt
         mul!(rhs_u, M_t, tmp_vec, -1.0, 1.0)
 
-        # - f^g(u^m)
         compute_convection_force!(f_g, op_conv_mat, u_m_vec)
         rhs_u .-= f_g
 
-        # - K^{uu} · u^m
         mul!(tmp_vec, Kuu_visc, u_m_vec)
         rhs_u .-= tmp_vec
 
-        # - K_pen · u^m
         mul!(tmp_vec, K_pen, u_m_vec)
         rhs_u .-= tmp_vec
 
-        # - K^{up} · p^m
-        mul!(tmp_vec, Kup', p_vec)
+        mul!(tmp_vec, Kup_T, p_vec)
         rhs_u .-= tmp_vec
 
-        # =================== 计算压力残差 c^m =====================================
+        # 压力连续性残差
         fill!(rhs_p, 0.0)
         mul!(rhs_p, Kup, u_m_vec)
         rhs_p .*= -1.0
         
-        # 【核心修正 2】: 严格对应清零被固定压力节点的右端残差
-        rhs_p[1] = 0.0            
+        # =================== 施加压力参考点 Dirichlet 边界条件 =====================
+        # 【修正】在计算完物理残差后，再修改矩阵和残差，真正固定 p_1 = 0.0
+        Kup_bc = copy(Kup)        # 避免修改原始物理矩阵
+        Kup_bc[1, :] .= 0.0
+        
+        Kup_T_bc = copy(Kup_T)    
+        Kup_T_bc[:, 1] .= 0.0     # 保持系统对称/正确解耦
 
-        # =================== 求解 Newton 增量 ================================
-        K = [Kuu  Kup'; Kup  Kpp]
+        Kpp[1, 1] = 1.0           
+        rhs_p[1]  = 0.0 - p_vec[1] # 这样解出的 Δp_1 会把 p_vec[1] 抵消到 0
+
+        # =================== 求解 Newton 增量 ===================================
+        # 注意：生产环境中这里应预先分配大矩阵 K，或者使用迭代求解器
+        K = [Kuu      Kup_T_bc;
+             Kup_bc   Kpp     ]
         RHS = [rhs_u; rhs_p]
         dx = K \ RHS
 
         Δu_vec = dx[1:2*nᵘ]
         Δp_vec = dx[2*nᵘ+1:end]
 
-        # =================== Newton 更新 =============================
+        # =================== Newton 更新 ========================================
         d₁ .+= Δu_vec[1:2:end]
         d₂ .+= Δu_vec[2:2:end]
         p_vec .+= Δp_vec
-        push!(nodes,   :d₁ => d₁, :d₂ => d₂)
-        push!(nodes_p, :p => p_vec)
+        
+        # 使用 copy 防止引用污染历史记录
+        push!(nodes,   :d₁ => copy(d₁), :d₂ => copy(d₂))
+        push!(nodes_p, :p => copy(p_vec))
 
         for elm in elements_u
             update_velocity(elm)
@@ -334,172 +340,150 @@ end
 
 # ====================== Section 7: 时间推进主循环 ==============================
 
-@info "Starting time integration..."
-
-for step in 1:nsteps
-    global d₁, d₂, p_vec, d₁_old, d₂_old, d₁_old2, d₂_old2
-    # global particles_x, particles_y
-
-    t = step * Δt
-    @printf("\n--- Step %3d / %d (t = %.3f) ---\n", step, nsteps, t)
-
-    # ---- 7.0 时空耦合入口剖面: 时间斜坡 × 空间抛物型 (消除角点奇异性) ----
-    if t < T_ramp
-        τ = t / T_ramp
-        ramp_factor = τ^2 * (3.0 - 2.0τ)
-    else
-        ramp_factor = 1.0
-    end
-
-    prescribe!(elements_inlet, :g₁ => 0.0, :g₂ => 0.0, :α   => α_pen,
-                               :n₁₁ => 1.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
-
-    # 逐积分点写入 y 相关的 g₁ 值
-    for elm in elements_inlet
-        for ξ in elm.𝓖
-            y = ξ.y
-            spatial_u = U₀ * (1.0 - (y / H_half)^2)
-            ξ.g₁ = spatial_u * ramp_factor
-        end
-    end
-
-    fill!(K_pen, 0.0)
-    fill!(f_pen, 0.0)
-    bc_op(K_pen, f_pen)
-
-
-    # ---- Newton 初值 ----
-if step == 1
-        @. d₁ = d₁_old
-        @. d₂ = d₂_old
-    else
-        # 始终使用线性外推作为更好的初猜值
-        @. d₁ = 2.0 * d₁_old - d₁_old2
-        @. d₂ = 2.0 * d₂_old - d₂_old2
-    end
-
-
-    push!(nodes, :d₁ => d₁, :d₂ => d₂)
-
-    for elm in elements_u
-    update_velocity(elm)
-end
-
-    # ---- 7.1 Newton-Raphson 非线性求解 ----
-    converged, iters, rel_err = Base.invokelatest(newton_step!,
-        d₁, d₂, p_vec, d₁_old, d₂_old;
-        Kuu=Kuu, Kuu_visc=Kuu_visc, Kup=Kup, Kpp=Kpp,
-        tmp_vec=tmp_vec, rhs_u=rhs_u, rhs_p=rhs_p,
-        K_pen=K_pen, f_pen=f_pen, M_t=M_t,
-        f_g=f_g, elements_u=elements_u,
-        op_conv_mat=op_conv_mat, op_pres_mat=op_pres_mat,
-        nᵘ=nᵘ,
-        Δt=Δt,
-        tol=newtonTol, maxiter=maxNewton
-    )
-
-    if !converged
-        @warn "Newton did NOT converge in step $step (final rel_err = $(@sprintf("%.3e", rel_err)))"
-    else
-        @printf("  Newton converged in %d iters, rel_err = %.3e\n", iters, rel_err)
-    end
-
-    # ---- 7.2 时间步更新: u^{n-1} ← u^n, u^n ← u^{n+1} ----
-    @. d₁_old2 = d₁_old
-    @. d₂_old2 = d₂_old
-    @. d₁_old = d₁
-    @. d₂_old = d₂
-    push!(nodes, :d₁_old => d₁_old, :d₂_old => d₂_old)
-
-     # ---- 7.3 VTK 输出 ----
-   if step % vtk_interval == 0 || step == nsteps
-
-    @info "Writing VTK for step $step..."
+function solve_unsteady_navier_stokes!(d₁, d₂, p_vec, d₁_old, d₂_old, d₁_old2, d₂_old2,
+                                       nodes, nodes_p, elements_u, elements_inlet,
+                                       elements_vtk, sp, TypeP, outdir, case_name, nᵘ;
+                                       Δt=Δt, nsteps=nsteps, vtk_interval=vtk_interval,
+                                       T_ramp=T_ramp, H_half=H_half, U₀=U₀, α_pen=α_pen,
+                                       newtonTol=newtonTol, maxNewton=maxNewton,
+                                       Kuu=Kuu, Kuu_visc=Kuu_visc, Kup=Kup, Kpp=Kpp,
+                                       tmp_vec=tmp_vec, rhs_u=rhs_u, rhs_p=rhs_p,
+                                       K_pen=K_pen, f_pen=f_pen, M_t=M_t,
+                                       f_g=f_g, bc_op=bc_op,
+                                       op_conv_mat=op_conv_mat, op_pres_mat=op_pres_mat)
 
     mkpath(outdir)
 
-    pressure = zeros(nᵘ)
-    u₁_vtk = zeros(nᵘ)
-    u₂_vtk = zeros(nᵘ)
-    u₃_vtk = zeros(nᵘ)
+    for step in 1:nsteps
+        t = step * Δt
+        @printf("\n--- Step %3d / %d (t = %.3f) ---\n", step, nsteps, t)
 
-    𝗠 = zeros(10)
+        # ---- 1. 设置入口边界条件（时空耦合抛物剖面） ----
+        if t < T_ramp
+            τ = t / T_ramp
+            ramp_factor = τ^2 * (3.0 - 2.0τ)
+        else
+            ramp_factor = 1.0
+        end
 
-    for (i,node) in enumerate(nodes)
+        prescribe!(elements_inlet, :g₁ => 0.0, :g₂ => 0.0, :α   => α_pen,
+                                   :n₁₁ => 1.0, :n₂₂ => 1.0, :n₁₂ => 0.0)
 
-        x,y,z = node.x,node.y,node.z
+        for elm in elements_inlet
+            for ξ in elm.𝓖
+                y = ξ.y
+                spatial_u = U₀#开阔空间的流入速度
+                # spatial_u = U₀ * (1.0 - (y / H_half)^2)狭窄空间，管道的流入速度
+                ξ.g₁ = spatial_u * ramp_factor
+            end
+        end
 
-        indices = sp(x,y,z)
-        ni = length(indices)
+        # 重新组装罚函数矩阵/力向量（入口边界条件随时间变化）
+        fill!(K_pen, 0.0)
+        fill!(f_pen, 0.0)
+        bc_op(K_pen, f_pen)
 
-        
-        pts = [nodes_p[i] for i in indices]
+        # ---- 2. Newton 初猜 (Predictor) ----
+        if step == 1
+            @. d₁ = d₁_old
+            @. d₂ = d₂_old
+        else
+            @. d₁ = 2.0 * d₁_old - d₁_old2
+            @. d₂ = 2.0 * d₂_old - d₂_old2
+        end
 
-        data = Dict(
-            :x=>(2,[x]),
-            :y=>(2,[y]),
-            :z=>(2,[z]),
-            :𝝭=>(4,zeros(ni)),
-            :𝗠=>(0,𝗠)
+        for elm in elements_u
+            update_velocity(elm)
+        end
+
+        # ---- 3. Newton-Raphson 非线性求解 (Corrector) ----
+        converged, iters, rel_err = newton_step!(
+            d₁, d₂, p_vec, d₁_old, d₂_old;
+            Kuu=Kuu, Kuu_visc=Kuu_visc, Kup=Kup, Kpp=Kpp,
+            tmp_vec=tmp_vec, rhs_u=rhs_u, rhs_p=rhs_p,
+            K_pen=K_pen, f_pen=f_pen, M_t=M_t,
+            f_g=f_g, elements_u=elements_u,
+            op_conv_mat=op_conv_mat, op_pres_mat=op_pres_mat,
+            nᵘ=nᵘ,
+            Δt=Δt,
+            tol=newtonTol, maxiter=maxNewton
         )
 
-        ξ = 𝑿ₛ((𝑔=1,𝐺=1,𝐶=1,𝑠=0),data)
-
-        a_p = TypeP(pts,[ξ])
-
-        set𝝭!(a_p)
-
-        Np = ξ[:𝝭]
-
-        p_val = 0.0
-
-        for (k,xₖ) in enumerate(pts)
-            p_val += Np[k]*xₖ.p
+        if !converged
+            @warn "Newton did NOT converge in step $step (final rel_err = $(@sprintf("%.3e", rel_err)))"
+            break
+        else
+            @printf("  Newton converged in %d iters, rel_err = %.3e\n", iters, rel_err)
         end
 
-        pressure[i] = p_val
+        # ---- 4. 时间步状态推进 ----
+        @. d₁_old2 = d₁_old
+        @. d₂_old2 = d₂_old
+        @. d₁_old  = d₁
+        @. d₂_old  = d₂
+        push!(nodes,   :d₁_old => d₁_old, :d₂_old => d₂_old)
 
+        # ---- 5. VTK 输出 ----
+        if step % vtk_interval == 0 || step == nsteps
+            @info "Writing VTK for step $step..."
 
-        u₁_vtk[i] = node.d₁
-        u₂_vtk[i] = node.d₂
+            pressure = zeros(nᵘ)
+            u₁_vtk = zeros(nᵘ)
+            u₂_vtk = zeros(nᵘ)
+            u₃_vtk = zeros(nᵘ)
+            𝗠 = zeros(10)
 
-    end
+            for (i, node) in enumerate(nodes)
+                x, y, z = node.x, node.y, node.z
+                indices = sp(x, y, z)
+                ni = length(indices)
+                pts = [nodes_p[j] for j in indices]
 
+                data = Dict(
+                    :x=>(2,[x]), :y=>(2,[y]), :z=>(2,[z]),
+                    :𝝭=>(4,zeros(ni)), :𝗠=>(0,𝗠)
+                )
+                ξ = 𝑿ₛ((𝑔=1,𝐺=1,𝐶=1,𝑠=0), data)
+                a_p = TypeP(pts, [ξ])
+                set𝝭!(a_p)
 
+                p_val = 0.0
+                Np = ξ[:𝝭]
+                for (k, xₖ) in enumerate(pts)
+                    p_val += Np[k] * xₖ.p
+                end
+                pressure[i] = p_val
+                u₁_vtk[i] = node.d₁
+                u₂_vtk[i] = node.d₂
+            end
 
-    points = zeros(3,nᵘ)
+            points = zeros(3, nᵘ)
+            for node in nodes
+                I = node.𝐼
+                points[1, I] = node.x
+                points[2, I] = node.y
+                points[3, I] = node.z
+            end
 
-    for node in nodes
-        I=node.𝐼
-        points[1,I]=node.x
-        points[2,I]=node.y
-        points[3,I]=node.z
-    end
+            cells = [MeshCell(VTKCellTypes.VTK_TRIANGLE, [xᵢ.𝐼 for xᵢ in elm.𝓒])
+                     for elm in elements_vtk]
 
-    vtk_cell_type = VTKCellTypes.VTK_TRIANGLE
-
-
-    cells=[
-        MeshCell(
-            vtk_cell_type,
-            [xᵢ.𝐼 for xᵢ in elm.𝓒]
-        ) for elm in elements_vtk
-    ]
-# 文件名
-        filename = joinpath(
-        outdir,
-        "$(case_name)_step$(step).vtu"
-    )
-
-    vtk_grid(filename,points,cells) do vtk
-
-        vtk["u"] = (u₁_vtk,u₂_vtk,u₃_vtk)
-
-        vtk["p"] = pressure
+            filename = joinpath(outdir, "$(case_name)_step$(step).vtu")
+            vtk_grid(filename, points, cells) do vtk
+                vtk["u"] = (u₁_vtk, u₂_vtk, u₃_vtk)
+                vtk["p"] = pressure
+            end
         end
-
     end
+
+    return nodes
 end
+
+# ====================== Section 7b: 启动计算 ===================================
+
+solve_unsteady_navier_stokes!(d₁, d₂, p_vec, d₁_old, d₂_old, d₁_old2, d₂_old2,
+                               nodes, nodes_p, elements_u, elements_inlet,
+                               elements_vtk, sp, TypeP, outdir, case_name, nᵘ)
 
 # ========================= Section 8: PVD 集合文件 ==========================
 
